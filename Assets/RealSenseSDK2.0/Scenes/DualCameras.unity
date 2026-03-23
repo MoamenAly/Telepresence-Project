@@ -217,6 +217,8 @@ GameObject:
   m_Component:
   - component: {fileID: 702538986}
   - component: {fileID: 702538985}
+  - component: {fileID: 702538988}
+  - component: {fileID: 702538987}
   m_Layer: 0
   m_Name: DualRigManager
   m_TagString: Untagged
@@ -259,6 +261,41 @@ Transform:
   m_Father: {fileID: 0}
   m_RootOrder: 5
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &702538987
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 702538984}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 0da660d2f3a5fe444bd855254fbe2d89, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  rig: {fileID: 702538985}
+  positionStepMeters: 0.005
+  rotationStepDegrees: 0.25
+  fileName: DualD455Extrinsics.json
+--- !u!114 &702538988
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 702538984}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 60c2cf0b19788544a9ee9d57eeb2f6a5, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  rig: {fileID: 702538985}
+  depthWidth: 640
+  depthHeight: 480
+  colorWidth: 640
+  colorHeight: 480
+  fps: 30
+  applyOnAwake: 0
 --- !u!1001 &855460046
 PrefabInstance:
   m_ObjectHideFlags: 0
@@ -371,6 +408,25 @@ MeshRenderer:
     type: 3}
   m_PrefabInstance: {fileID: 1587673001}
   m_PrefabAsset: {fileID: 0}
+--- !u!114 &919203841
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 919203836}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 29a1018032cbc7c45b3cf08600d98efd, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  filterEnabled: 1
+  worldCenter: {x: 0, y: 0, z: 1}
+  worldSize: {x: 1.2, y: 1.8, z: 1.2}
+  minDepthMeters: 0.35
+  maxDepthMeters: 2.5
+  sampleStride: 2
+  drawRoiGizmo: 1
 --- !u!1001 &1587673001
 PrefabInstance:
   m_ObjectHideFlags: 0
@@ -635,6 +691,25 @@ MeshRenderer:
     type: 3}
   m_PrefabInstance: {fileID: 1951317478}
   m_PrefabAsset: {fileID: 0}
+--- !u!114 &2036714535
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2036714530}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 29a1018032cbc7c45b3cf08600d98efd, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  filterEnabled: 1
+  worldCenter: {x: 0, y: 0, z: 1}
+  worldSize: {x: 1.2, y: 1.8, z: 1.2}
+  minDepthMeters: 0.35
+  maxDepthMeters: 2.5
+  sampleStride: 2
+  drawRoiGizmo: 1
 --- !u!1 &2081674599
 GameObject:
   m_ObjectHideFlags: 0
@@ -1214,13 +1289,13 @@ MonoBehaviour:
     - Stream: 1
       Format: 1
       Framerate: 30
-      StreamIndex: 0
+      StreamIndex: -1
       Width: 640
       Height: 480
     - Stream: 2
       Format: 5
       Framerate: 30
-      StreamIndex: 0
+      StreamIndex: -1
       Width: 640
       Height: 480
     RequestedSerialNumber: 419222300508
@@ -1245,13 +1320,13 @@ MonoBehaviour:
     - Stream: 1
       Format: 1
       Framerate: 30
-      StreamIndex: 0
+      StreamIndex: -1
       Width: 640
       Height: 480
     - Stream: 2
       Format: 5
       Framerate: 30
-      StreamIndex: 0
+      StreamIndex: -1
       Width: 640
       Height: 480
     RequestedSerialNumber: 409122300736
