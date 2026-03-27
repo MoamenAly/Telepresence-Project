@@ -288,7 +288,7 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1046081098}
-  m_Enabled: 1
+  m_Enabled: 0
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 29a1018032cbc7c45b3cf08600d98efd, type: 3}
   m_Name: 
@@ -661,7 +661,7 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1457961784}
-  m_Enabled: 1
+  m_Enabled: 0
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 29a1018032cbc7c45b3cf08600d98efd, type: 3}
   m_Name: 
@@ -696,31 +696,31 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 4093320342193112, guid: a2bade7ff40ff92409855b062870dccd, type: 3}
       propertyPath: m_LocalPosition.x
-      value: 0
+      value: 0.76909953
       objectReference: {fileID: 0}
     - target: {fileID: 4093320342193112, guid: a2bade7ff40ff92409855b062870dccd, type: 3}
       propertyPath: m_LocalPosition.y
-      value: 0
+      value: -0.010000007
       objectReference: {fileID: 0}
     - target: {fileID: 4093320342193112, guid: a2bade7ff40ff92409855b062870dccd, type: 3}
       propertyPath: m_LocalPosition.z
-      value: 0
+      value: 0.5274
       objectReference: {fileID: 0}
     - target: {fileID: 4093320342193112, guid: a2bade7ff40ff92409855b062870dccd, type: 3}
       propertyPath: m_LocalRotation.w
-      value: 1
+      value: 0.8067262
       objectReference: {fileID: 0}
     - target: {fileID: 4093320342193112, guid: a2bade7ff40ff92409855b062870dccd, type: 3}
       propertyPath: m_LocalRotation.x
-      value: -0
+      value: -0.0281715
       objectReference: {fileID: 0}
     - target: {fileID: 4093320342193112, guid: a2bade7ff40ff92409855b062870dccd, type: 3}
       propertyPath: m_LocalRotation.y
-      value: -0
+      value: -0.58989394
       objectReference: {fileID: 0}
     - target: {fileID: 4093320342193112, guid: a2bade7ff40ff92409855b062870dccd, type: 3}
       propertyPath: m_LocalRotation.z
-      value: -0
+      value: -0.020599548
       objectReference: {fileID: 0}
     - target: {fileID: 4093320342193112, guid: a2bade7ff40ff92409855b062870dccd, type: 3}
       propertyPath: m_LocalEulerAnglesHint.x
@@ -939,6 +939,8 @@ GameObject:
   - component: {fileID: 1968642780}
   - component: {fileID: 1968642782}
   - component: {fileID: 1968642781}
+  - component: {fileID: 1968642783}
+  - component: {fileID: 1968642784}
   m_Layer: 0
   m_Name: TelepresenceRig
   m_TagString: Untagged
@@ -979,8 +981,8 @@ MonoBehaviour:
   cameraBSerial: 409122300736
   pointCloudRootA: {fileID: 1091868058}
   pointCloudRootB: {fileID: 1468959957}
-  positionBInA: {x: -0.51, y: -0.07, z: 0.49}
-  rotationBInAEuler: {x: -5, y: 64.55, z: 0}
+  positionBInA: {x: 0.76909953, y: -0.010000007, z: 0.5274}
+  rotationBInAEuler: {x: -4, y: -72.35, z: 0}
   applyOnAwake: 1
 --- !u!114 &1968642781
 MonoBehaviour:
@@ -1017,6 +1019,76 @@ MonoBehaviour:
   colorHeight: 480
   fps: 30
   applyOnAwake: 0
+--- !u!114 &1968642783
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1968642778}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 4decee53aea516e498b4c8352be0e7cb, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  rig: {fileID: 1968642780}
+  pointCloudMeshA: {fileID: 1046081101}
+  pointCloudMeshB: {fileID: 1457961787}
+  calibrationPersistence: {fileID: 1968642781}
+  sampleStride: 6
+  voxelSize: 0.06
+  minPointsPerCloud: 200
+  minDepthMeters: 0.4
+  maxDepthMeters: 2.5
+  positionStepMeters: 0.005
+  rotationStepDegrees: 0.25
+  applyNudgesInPlayMode: 0
+  fineModifier: 304
+  fineMultiplier: 0.2
+  coarseModifier: 306
+  coarseMultiplier: 5
+  movePosX: 100
+  moveNegX: 97
+  movePosY: 101
+  moveNegY: 113
+  movePosZ: 119
+  moveNegZ: 115
+  yawPos: 275
+  yawNeg: 276
+  pitchPos: 273
+  pitchNeg: 274
+  rollPos: 280
+  rollNeg: 281
+  saveKey: 286
+  showOverlay: 1
+--- !u!114 &1968642784
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1968642778}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: d0ece50853b9ab941817f8aac7ba44d4, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  rig: {fileID: 1968642780}
+  pointCloudMeshA: {fileID: 1046081101}
+  pointCloudMeshB: {fileID: 1457961787}
+  calibrationPersistence: {fileID: 1968642781}
+  deviceBTransform: {fileID: 1058191644}
+  sampleStride: 8
+  minDepthMeters: 0.4
+  maxDepthMeters: 2.5
+  maxPointsPerCloud: 1200
+  icpIterationsPerRun: 2
+  maxNeighborDistance: 0.3
+  stepBlend: 0.45
+  autoAlignInPlayMode: 0
+  autoAlignIntervalSeconds: 0.75
+  alignKey: 287
+  logToConsole: 1
 --- !u!1 &2063912747
 GameObject:
   m_ObjectHideFlags: 0
