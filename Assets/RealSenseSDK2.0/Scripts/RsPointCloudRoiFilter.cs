@@ -1,100 +1,70 @@
-using System.Collections.Generic;
 using UnityEngine;
 
-/// <summary>
-/// Runtime filter for RealSense point cloud meshes.
-/// Keeps only points inside a world-space ROI and depth range.
-/// Attach this to the same GameObject as RsPointCloudRenderer/MeshFilter.
-/// </summary>
-[DefaultExecutionOrder(1000)]
-[RequireComponent(typeof(MeshFilter))]
+[DefaultExecutionOrder(100)]
 public class RsPointCloudRoiFilter : MonoBehaviour
 {
-    [Header("Enable")]
-    public bool filterEnabled = true;
+    [Header("Depth Range (meters, in camera local Z)")]
+    public float minDepth = 0.3f;
+    public float maxDepth = 2.5f;
 
-    [Header("World ROI (meters)")]
-    [Tooltip("Center of the keep volume in world space.")]
-    public Vector3 worldCenter = new Vector3(0f, 1.1f, 1.0f);
+    [Header("World-Space Bounding Box")]
+    [Tooltip("Enable to also filter by a world-space bounding box.")]
+    public bool useBoundsFilter = false;
+    public Bounds roiBounds = new Bounds(Vector3.zero, new Vector3(3f, 3f, 3f));
 
-    [Tooltip("Size of the keep volume in world space.")]
-    public Vector3 worldSize = new Vector3(1.2f, 1.8f, 1.2f);
+    private MeshFilter meshFilter;
+    private Vector3[] vertices;
 
-    [Header("Depth Gate (local camera z, meters)")]
-    [Min(0.01f)] public float minDepthMeters = 0.35f;
-    [Min(0.02f)] public float maxDepthMeters = 2.5f;
-
-    [Header("Downsample")]
-    [Tooltip("Keep every Nth point after filtering. 1 = keep all.")]
-    [Min(1)] public int sampleStride = 2;
-
-    [Header("Debug")]
-    public bool drawRoiGizmo = true;
-
-    private MeshFilter _meshFilter;
-    private readonly List<Vector3> _vertices = new List<Vector3>(640 * 480);
-    private readonly List<int> _keptIndices = new List<int>(640 * 480);
-    private readonly int[] _empty = new int[0];
-
-    private void Awake()
+    void Awake()
     {
-        _meshFilter = GetComponent<MeshFilter>();
+        meshFilter = GetComponent<MeshFilter>();
+        if (meshFilter == null)
+        {
+            Debug.LogError("[ROI] MeshFilter not found on " + gameObject.name, this);
+            enabled = false;
+        }
     }
 
-    private void LateUpdate()
+    void LateUpdate()
     {
-        if (!filterEnabled || _meshFilter == null)
-            return;
+        var mesh = meshFilter != null ? meshFilter.sharedMesh : null;
+        if (mesh == null || mesh.vertexCount == 0) return;
 
-        var mesh = _meshFilter.sharedMesh;
-        if (mesh == null)
-            return;
+        vertices = mesh.vertices;
+        bool modified = false;
 
-        _vertices.Clear();
-        mesh.GetVertices(_vertices);
-        if (_vertices.Count == 0)
-            return;
+        Matrix4x4 localToWorld = useBoundsFilter ? transform.localToWorldMatrix : Matrix4x4.identity;
 
-        _keptIndices.Clear();
-
-        var half = worldSize * 0.5f;
-        var min = worldCenter - half;
-        var max = worldCenter + half;
-        var stride = sampleStride < 1 ? 1 : sampleStride;
-
-        for (int i = 0; i < _vertices.Count; i += stride)
+        for (int i = 0; i < vertices.Length; i++)
         {
-            var local = _vertices[i];
-            var z = local.z;
-            if (z < minDepthMeters || z > maxDepthMeters)
+            var v = vertices[i];
+            if (v.x == 0 && v.y == 0 && v.z == 0)
                 continue;
 
-            var world = transform.TransformPoint(local);
-            if (world.x < min.x || world.x > max.x)
-                continue;
-            if (world.y < min.y || world.y > max.y)
-                continue;
-            if (world.z < min.z || world.z > max.z)
-                continue;
+            float depth = v.z;
 
-            _keptIndices.Add(i);
+            if (depth < minDepth || depth > maxDepth)
+            {
+                vertices[i] = Vector3.zero;
+                modified = true;
+                continue;
+            }
+
+            if (useBoundsFilter)
+            {
+                Vector3 worldPos = localToWorld.MultiplyPoint3x4(v);
+                if (!roiBounds.Contains(worldPos))
+                {
+                    vertices[i] = Vector3.zero;
+                    modified = true;
+                }
+            }
         }
 
-        if (_keptIndices.Count == 0)
+        if (modified)
         {
-            mesh.SetIndices(_empty, MeshTopology.Points, 0, false);
-            return;
+            mesh.vertices = vertices;
+            mesh.UploadMeshData(false);
         }
-
-        mesh.SetIndices(_keptIndices, MeshTopology.Points, 0, false);
-    }
-
-    private void OnDrawGizmosSelected()
-    {
-        if (!drawRoiGizmo)
-            return;
-
-        Gizmos.color = Color.green;
-        Gizmos.DrawWireCube(worldCenter, worldSize);
     }
 }

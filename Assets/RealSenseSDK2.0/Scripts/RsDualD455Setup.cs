@@ -1,161 +1,107 @@
-using System;
-using System.Collections.Generic;
+using System.Collections;
+using System.Linq;
 using Intel.RealSense;
 using UnityEngine;
 
-/// <summary>
-/// Utility component for fast setup of two connected D455 cameras.
-/// Attach it to the same GameObject as RsDualCameraPointCloudRig.
-/// </summary>
 public class RsDualD455Setup : MonoBehaviour
 {
-    [Header("Rig")]
-    public RsDualCameraPointCloudRig rig;
+    [Tooltip("Seconds to wait for both cameras before logging an error.")]
+    public float startupTimeout = 10f;
 
-    [Header("Recommended D455 Streams")]
-    [Min(1)] public int depthWidth = 640;
-    [Min(1)] public int depthHeight = 480;
-    [Min(1)] public int colorWidth = 640;
-    [Min(1)] public int colorHeight = 480;
-    [Min(1)] public int fps = 30;
+    public bool BothStreaming { get; private set; }
 
-    [Header("Startup")]
-    [Tooltip("If true, configure serials and stream profiles on Awake.")]
-    public bool applyOnAwake;
+    private RsDevice[] devices;
+    private bool[] started;
+    private float startTime;
 
-    private void Awake()
+    void Awake()
     {
-        if (applyOnAwake)
-            AutoConfigure();
-    }
+        devices = GetComponentsInChildren<RsDevice>(true);
 
-    [ContextMenu("Auto Configure Dual D455")]
-    public void AutoConfigure()
-    {
-        if (rig == null)
-            rig = GetComponent<RsDualCameraPointCloudRig>();
-
-        if (rig == null)
+        if (devices.Length < 2)
         {
-            Debug.LogError("RsDualD455Setup: missing RsDualCameraPointCloudRig reference.");
+            Debug.LogError("[DualD455] Expected 2 RsDevice children but found " + devices.Length);
+            enabled = false;
             return;
         }
 
-        var serials = GetConnectedSerials();
-        if (serials.Count < 2)
+        ValidateSerials();
+        ValidateProfiles();
+
+        started = new bool[devices.Length];
+        for (int i = 0; i < devices.Length; i++)
         {
-            Debug.LogError("RsDualD455Setup: fewer than 2 RealSense devices detected.");
-            return;
+            int idx = i;
+            devices[i].OnStart += profile => OnDeviceStarted(idx, profile);
         }
 
-        rig.cameraASerial = serials[0];
-        rig.cameraBSerial = serials[1];
-        rig.ApplySerials();
-
-        ApplyRecommendedProfiles(rig.cameraA);
-        ApplyRecommendedProfiles(rig.cameraB);
-
-        Debug.Log(string.Format(
-            "RsDualD455Setup: configured A={0}, B={1}, profile Depth({2}x{3}@{4}) + Color({5}x{6}@{4}).",
-            rig.cameraASerial,
-            rig.cameraBSerial,
-            depthWidth,
-            depthHeight,
-            fps,
-            colorWidth,
-            colorHeight
-        ));
+        startTime = Time.realtimeSinceStartup;
+        StartCoroutine(CheckTimeout());
     }
 
-    [ContextMenu("Apply Recommended Profiles Only")]
-    public void ApplyProfilesOnly()
+    private void ValidateSerials()
     {
-        if (rig == null)
-            rig = GetComponent<RsDualCameraPointCloudRig>();
+        string serialA = devices[0].DeviceConfiguration.RequestedSerialNumber;
+        string serialB = devices[1].DeviceConfiguration.RequestedSerialNumber;
 
-        if (rig == null)
+        if (string.IsNullOrEmpty(serialA) || string.IsNullOrEmpty(serialB))
+            Debug.LogWarning("[DualD455] One or both RsDevice serial numbers are empty. " +
+                             "Each device should target a specific serial to avoid conflicts.");
+
+        if (serialA == serialB)
+            Debug.LogError("[DualD455] Both RsDevice components target the same serial '" + serialA +
+                           "'. Assign distinct serial numbers.");
+    }
+
+    private void ValidateProfiles()
+    {
+        var profA = devices[0].DeviceConfiguration.Profiles;
+        var profB = devices[1].DeviceConfiguration.Profiles;
+
+        if (profA == null || profB == null) return;
+
+        foreach (var pa in profA)
         {
-            Debug.LogError("RsDualD455Setup: missing RsDualCameraPointCloudRig reference.");
-            return;
+            var match = profB.FirstOrDefault(pb => pb.Stream == pa.Stream);
+            if (match.Width == 0) continue;
+
+            if (pa.Width != match.Width || pa.Height != match.Height)
+                Debug.LogWarning($"[DualD455] Stream {pa.Stream} resolution mismatch: " +
+                                 $"A={pa.Width}x{pa.Height}, B={match.Width}x{match.Height}");
+
+            if (pa.Framerate != match.Framerate)
+                Debug.LogWarning($"[DualD455] Stream {pa.Stream} FPS mismatch: " +
+                                 $"A={pa.Framerate}, B={match.Framerate}");
         }
-
-        ApplyRecommendedProfiles(rig.cameraA);
-        ApplyRecommendedProfiles(rig.cameraB);
-        Debug.Log("RsDualD455Setup: applied recommended profiles.");
     }
 
-    [ContextMenu("Print Connected RealSense Serials")]
-    public void PrintConnectedSerials()
+    private void OnDeviceStarted(int index, PipelineProfile profile)
     {
-        var serials = GetConnectedSerials();
-        if (serials.Count == 0)
+        started[index] = true;
+        string serial = "unknown";
+        try { serial = profile.Device.Info.GetInfo(CameraInfo.SerialNumber); } catch { }
+        Debug.Log($"[DualD455] Device {index} streaming (serial {serial})");
+
+        if (started.All(s => s))
         {
-            Debug.LogWarning("RsDualD455Setup: no connected RealSense devices found.");
-            return;
+            BothStreaming = true;
+            float elapsed = Time.realtimeSinceStartup - startTime;
+            Debug.Log($"[DualD455] Both D455 cameras streaming. Startup took {elapsed:F1}s");
         }
-
-        Debug.Log("RsDualD455Setup: connected serials = " + string.Join(", ", serials.ToArray()));
     }
 
-    private List<string> GetConnectedSerials()
+    private IEnumerator CheckTimeout()
     {
-        var serials = new List<string>();
+        yield return new WaitForSeconds(startupTimeout);
 
-        try
+        if (!BothStreaming)
         {
-            using (var ctx = new Context())
-            using (var devices = ctx.QueryDevices())
+            for (int i = 0; i < devices.Length; i++)
             {
-                foreach (var dev in devices)
-                {
-                    try
-                    {
-                        var serial = dev.Info[CameraInfo.SerialNumber];
-                        if (!string.IsNullOrEmpty(serial))
-                            serials.Add(serial);
-                    }
-                    finally
-                    {
-                        if (dev != null)
-                            dev.Dispose();
-                    }
-                }
+                if (!started[i])
+                    Debug.LogError($"[DualD455] Device {i} (serial '{devices[i].DeviceConfiguration.RequestedSerialNumber}') " +
+                                   "did not start within timeout. Check USB connection and serial number.");
             }
         }
-        catch (Exception e)
-        {
-            Debug.LogException(e);
-        }
-
-        return serials;
-    }
-
-    private void ApplyRecommendedProfiles(RsDevice device)
-    {
-        if (device == null)
-            return;
-
-        device.DeviceConfiguration.mode = RsConfiguration.Mode.Live;
-        device.DeviceConfiguration.Profiles = new[]
-        {
-            new RsVideoStreamRequest
-            {
-                Stream = Stream.Depth,
-                StreamIndex = -1,
-                Width = depthWidth,
-                Height = depthHeight,
-                Format = Format.Z16,
-                Framerate = fps
-            },
-            new RsVideoStreamRequest
-            {
-                Stream = Stream.Color,
-                StreamIndex = -1,
-                Width = colorWidth,
-                Height = colorHeight,
-                Format = Format.Rgb8,
-                Framerate = fps
-            }
-        };
     }
 }

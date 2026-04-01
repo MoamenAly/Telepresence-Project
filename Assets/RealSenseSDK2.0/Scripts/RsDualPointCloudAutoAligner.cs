@@ -1,409 +1,463 @@
+using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Threading;
 using UnityEngine;
+using Debug = UnityEngine.Debug;
 
-/// <summary>
-/// Automatic rigid alignment of camera B to camera A (Umeyama / Kabsch, scale = 1).
-/// Updates <see cref="RsDualCameraPointCloudRig"/> extrinsics without manual Inspector edits.
-/// Press F6 in Play mode, or enable auto-align. Subject must be visible in both depth views.
-/// </summary>
-[DefaultExecutionOrder(925)]
 public class RsDualPointCloudAutoAligner : MonoBehaviour
 {
-    [Header("References")]
-    public RsDualCameraPointCloudRig rig;
-    public MeshFilter pointCloudMeshA;
-    public MeshFilter pointCloudMeshB;
-    public RsDualCameraExtrinsicsCalibration calibrationPersistence;
+    [Header("ICP Parameters")]
+    public int iterations = 30;
+    public float maxNeighborDistance = 0.15f;
+    [Range(0.1f, 1f)] public float convergenceRate = 0.5f;
+    public int targetSampleCount = 1000;
 
-    [Tooltip("RsDevice_B transform (parent of PointCloud_B). Defaults to rig.cameraB.transform.")]
-    public Transform deviceBTransform;
+    [Header("Safety")]
+    [Tooltip("Only apply ICP result if mean error improves by at least this fraction (e.g. 0.05 = 5%).")]
+    public float minImprovementRatio = 0.05f;
 
-    [Header("Sampling")]
-    [Min(1)] public int sampleStride = 8;
-    [Min(0.01f)] public float minDepthMeters = 0.4f;
-    [Min(0.02f)] public float maxDepthMeters = 2.5f;
-    [Min(32)] public int maxPointsPerCloud = 1200;
+    [Header("Persistence")]
+    public bool saveExtrinsicsAfterAlign = false;
 
-    [Header("ICP")]
-    [Min(1)] public int icpIterationsPerRun = 2;
-    [Min(0.01f)] public float maxNeighborDistance = 0.3f;
-    [Range(0f, 1f)] public float stepBlend = 0.45f;
+    private RsDualCameraPointCloudRig rig;
+    private RsDualCameraExtrinsicsCalibration calibration;
 
-    [Header("Auto")]
-    public bool autoAlignInPlayMode;
-    [Min(0.2f)] public float autoAlignIntervalSeconds = 0.75f;
+    private volatile bool isAligning;
+    private volatile bool resultReady;
 
-    [Header("Input")]
-    public KeyCode alignKey = KeyCode.F6;
+    private Quaternion resultQuaternion;
+    private Vector3 resultTranslation;
+    private float resultMeanError;
+    private float beforeMeanError;
+    private int resultPairCount;
+    private volatile bool resultAccepted;
 
-    [Header("Debug")]
-    public bool logToConsole = true;
+    // Backup for F7 revert
+    private Vector3 backupTranslation;
+    private Vector3 backupRotationEuler;
+    private bool hasBackup;
 
-    private readonly List<Vector3> _scratchVerts = new List<Vector3>(640 * 480);
-    private readonly List<Vector3> _worldA = new List<Vector3>(2048);
-    private readonly List<Vector3> _worldB = new List<Vector3>(2048);
-    private readonly List<Vector3> _pairedA = new List<Vector3>(2048);
-    private readonly List<Vector3> _pairedB = new List<Vector3>(2048);
-
-    private float _lastAutoTime;
-
-    private void Awake()
+    void Awake()
     {
-        if (deviceBTransform == null && rig != null && rig.cameraB != null)
-            deviceBTransform = rig.cameraB.transform;
+        rig = GetComponent<RsDualCameraPointCloudRig>();
+        calibration = GetComponent<RsDualCameraExtrinsicsCalibration>();
+
+        if (rig == null || calibration == null)
+        {
+            Debug.LogError("[AutoAlign] Requires RsDualCameraPointCloudRig and RsDualCameraExtrinsicsCalibration.", this);
+            enabled = false;
+        }
     }
 
-    private void Update()
+    void Update()
     {
-        if (!Application.isPlaying || rig == null)
+        if (Input.GetKeyDown(KeyCode.F6) && !isAligning)
+            StartAlignment();
+
+        // F7 = revert to backup
+        if (Input.GetKeyDown(KeyCode.F7) && hasBackup)
+        {
+            calibration.translationOffset = backupTranslation;
+            calibration.rotationEulerOffset = backupRotationEuler;
+            calibration.ApplyExtrinsics();
+            Debug.Log("[AutoAlign] F7: Reverted to pre-F6 calibration.");
+        }
+
+        if (resultReady)
+        {
+            if (resultAccepted)
+            {
+                Vector3 euler = resultQuaternion.eulerAngles;
+                if (euler.x > 180f) euler.x -= 360f;
+                if (euler.y > 180f) euler.y -= 360f;
+                if (euler.z > 180f) euler.z -= 360f;
+
+                calibration.translationOffset = resultTranslation;
+                calibration.rotationEulerOffset = euler;
+                calibration.ApplyExtrinsics();
+
+                Debug.Log($"[AutoAlign] Applied! Before={beforeMeanError:F4}m -> After={resultMeanError:F4}m " +
+                          $"({resultPairCount} pairs) | " +
+                          $"T=({resultTranslation.x:F4}, {resultTranslation.y:F4}, {resultTranslation.z:F4}) | " +
+                          $"R=({euler.x:F2}, {euler.y:F2}, {euler.z:F2}) | Press F7 to undo");
+
+                if (saveExtrinsicsAfterAlign)
+                    calibration.SaveExtrinsics();
+            }
+            else
+            {
+                Debug.LogWarning($"[AutoAlign] REJECTED: ICP did not improve alignment. " +
+                                 $"Before={beforeMeanError:F4}m, After={resultMeanError:F4}m. " +
+                                 $"Calibration unchanged. Try manual WASDQE adjustment first.");
+            }
+
+            resultReady = false;
+            isAligning = false;
+        }
+    }
+
+    private void StartAlignment()
+    {
+        if (rig.pointCloudA == null || rig.pointCloudB == null)
+        {
+            Debug.LogWarning("[AutoAlign] Point cloud references not set.");
             return;
-
-        if (Input.GetKeyDown(alignKey))
-            RunAlignment();
-
-        if (autoAlignInPlayMode && Time.unscaledTime - _lastAutoTime >= autoAlignIntervalSeconds)
-        {
-            _lastAutoTime = Time.unscaledTime;
-            RunAlignment();
         }
-    }
 
-    [ContextMenu("Run Auto Alignment Now")]
-    public void RunAlignment()
-    {
-        if (rig == null || pointCloudMeshA == null || pointCloudMeshB == null)
+        var mfA = rig.pointCloudA.GetComponent<MeshFilter>();
+        var mfB = rig.pointCloudB.GetComponent<MeshFilter>();
+        if (mfA == null || mfB == null || mfA.sharedMesh == null || mfB.sharedMesh == null)
         {
-            Debug.LogWarning("RsDualPointCloudAutoAligner: missing rig or mesh filters.");
+            Debug.LogWarning("[AutoAlign] Meshes not ready yet.");
             return;
         }
 
-        if (deviceBTransform == null && rig.cameraB != null)
-            deviceBTransform = rig.cameraB.transform;
+        var vertsA = mfA.sharedMesh.vertices;
+        var vertsB = mfB.sharedMesh.vertices;
 
-        if (deviceBTransform == null)
+        int strideA = Mathf.Max(1, vertsA.Length / (targetSampleCount * 3));
+        int strideB = Mathf.Max(1, vertsB.Length / (targetSampleCount * 3));
+        var sampledA = SampleValidVertices(vertsA, strideA, targetSampleCount);
+        var sampledB = SampleValidVertices(vertsB, strideB, targetSampleCount);
+
+        if (sampledA.Length < 30 || sampledB.Length < 30)
         {
-            Debug.LogWarning("RsDualPointCloudAutoAligner: assign deviceBTransform.");
+            Debug.LogWarning($"[AutoAlign] Not enough valid vertices: A={sampledA.Length}, B={sampledB.Length}. Need 30+.");
             return;
         }
 
-        for (int iter = 0; iter < icpIterationsPerRun; iter++)
-        {
-            rig.ApplyTransforms();
+        // Backup current calibration before ICP
+        backupTranslation = calibration.translationOffset;
+        backupRotationEuler = calibration.rotationEulerOffset;
+        hasBackup = true;
 
-            if (!BuildWorldPoints(pointCloudMeshA, _worldA) || !BuildWorldPoints(pointCloudMeshB, _worldB))
+        Quaternion startRot = Quaternion.Euler(calibration.rotationEulerOffset);
+        Vector3 startTrans = calibration.translationOffset;
+        int iters = iterations;
+        float maxDist = maxNeighborDistance;
+        float rate = convergenceRate;
+        float minImprove = minImprovementRatio;
+
+        isAligning = true;
+        resultReady = false;
+
+        Debug.Log($"[AutoAlign] F6: Starting ICP ({sampledA.Length}/{sampledB.Length} pts, {iters} iters, maxDist={maxDist}m)");
+
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            try
             {
-                if (logToConsole)
-                    Debug.LogWarning("RsDualPointCloudAutoAligner: not enough depth points.");
-                return;
+                RunICP(sampledA, sampledB, startTrans, startRot, iters, maxDist, rate, minImprove);
             }
-
-            BuildNearestPairs(_worldA, _worldB, maxNeighborDistance);
-            if (_pairedA.Count < 32)
+            catch (Exception e)
             {
-                if (logToConsole)
-                    Debug.LogWarning("RsDualPointCloudAutoAligner: too few correspondences.");
-                return;
+                Debug.LogError("[AutoAlign] ICP error: " + e.Message + "\n" + e.StackTrace);
+                isAligning = false;
             }
+        });
+    }
 
-            Vector3 meanA = Mean(_pairedA);
-            Vector3 meanB = Mean(_pairedB);
+    private Vector3[] SampleValidVertices(Vector3[] verts, int stride, int maxCount)
+    {
+        var list = new List<Vector3>(maxCount);
+        for (int i = 0; i < verts.Length && list.Count < maxCount; i += stride)
+        {
+            var v = verts[i];
+            if (v.x != 0 || v.y != 0 || v.z != 0)
+                list.Add(v);
+        }
+        return list.ToArray();
+    }
 
-            float[,] sigma = new float[3, 3];
-            int n = _pairedA.Count;
-            for (int i = 0; i < n; i++)
+    private void RunICP(Vector3[] srcA, Vector3[] srcB, Vector3 startTrans, Quaternion startRot,
+                        int iters, float maxDist, float rate, float minImprove)
+    {
+        var sw = Stopwatch.StartNew();
+
+        // Compute alignment error BEFORE ICP
+        float errorBefore = ComputeAlignmentError(srcA, srcB, startTrans, startRot, maxDist);
+        Debug.Log($"[AutoAlign] Error before ICP: {errorBefore:F4}m");
+
+        Quaternion currentRot = startRot;
+        Vector3 currentTrans = startTrans;
+        var transformedB = new Vector3[srcB.Length];
+        int[] matchA = new int[srcB.Length];
+        int[] matchB = new int[srcB.Length];
+        float lastError = errorBefore;
+        int lastPairCount = 0;
+
+        for (int iter = 0; iter < iters; iter++)
+        {
+            float adaptMaxDist = maxDist;
+            float adaptMaxDistSq = adaptMaxDist * adaptMaxDist;
+
+            for (int i = 0; i < srcB.Length; i++)
+                transformedB[i] = RotatePoint(currentRot, srcB[i]) + currentTrans;
+
+            var grid = BuildSpatialGrid(srcA, adaptMaxDist);
+            int matchCount = 0;
+
+            for (int i = 0; i < transformedB.Length; i++)
             {
-                Vector3 a = _pairedA[i] - meanA;
-                Vector3 b = _pairedB[i] - meanB;
-                for (int r = 0; r < 3; r++)
-                    for (int c = 0; c < 3; c++)
-                        sigma[r, c] += Component(a, r) * Component(b, c);
-            }
-            for (int r = 0; r < 3; r++)
-                for (int c = 0; c < 3; c++)
-                    sigma[r, c] /= n;
-
-            UmeyamaRigidNoScale(sigma, meanA, meanB, out Quaternion rWorld, out Vector3 tWorld);
-
-            Matrix4x4 tw = Matrix4x4.TRS(tWorld, rWorld, Vector3.one);
-            Matrix4x4 tb = deviceBTransform.localToWorldMatrix;
-            Matrix4x4 teOld = Matrix4x4.TRS(rig.positionBInA, Quaternion.Euler(rig.rotationBInAEuler), Vector3.one);
-            Matrix4x4 teNew = tb.inverse * tw * tb * teOld;
-
-            Vector3 targetPos = new Vector3(teNew.m03, teNew.m13, teNew.m23);
-            Quaternion targetRot = RotationFromUpper3x3(teNew);
-
-            rig.positionBInA = Vector3.Lerp(rig.positionBInA, targetPos, stepBlend);
-            rig.rotationBInAEuler = Vector3.Lerp(rig.rotationBInAEuler, targetRot.eulerAngles, stepBlend);
-            rig.ApplyTransforms();
-        }
-
-        if (logToConsole)
-            Debug.LogFormat(
-                "RsDualPointCloudAutoAligner: pairs={0} B->A pos=({1:F4},{2:F4},{3:F4})",
-                _pairedA.Count, rig.positionBInA.x, rig.positionBInA.y, rig.positionBInA.z
-            );
-    }
-
-    [ContextMenu("Save Extrinsics To JSON")]
-    public void SaveExtrinsics()
-    {
-        if (calibrationPersistence != null)
-            calibrationPersistence.SaveToJson();
-    }
-
-    /// <summary>
-    /// sigma = (1/n) sum (a_i - meanA)(b_i - meanB)^T with a=A world, b=B world.
-    /// R,t minimize || R b + t - a ||; t = meanA - R meanB (Umeyama, c=1).
-    /// </summary>
-    private static void UmeyamaRigidNoScale(float[,] sigma, Vector3 meanA, Vector3 meanB, out Quaternion r, out Vector3 t)
-    {
-        float[,] ata = new float[3, 3];
-        for (int i = 0; i < 3; i++)
-            for (int j = 0; j < 3; j++)
-            {
-                float s = 0f;
-                for (int k = 0; k < 3; k++)
-                    s += sigma[k, i] * sigma[k, j];
-                ata[i, j] = s;
-            }
-
-        JacobiEigenSymmetric3(ata, out float[] evals, out float[,] v);
-
-        float s0 = Mathf.Sqrt(Mathf.Max(evals[0], 1e-14f));
-        float s1 = Mathf.Sqrt(Mathf.Max(evals[1], 1e-14f));
-        float s2 = Mathf.Sqrt(Mathf.Max(evals[2], 1e-14f));
-
-        float[,] vInvS = new float[3, 3];
-        for (int i = 0; i < 3; i++)
-        {
-            vInvS[i, 0] = v[i, 0] / s0;
-            vInvS[i, 1] = v[i, 1] / s1;
-            vInvS[i, 2] = v[i, 2] / s2;
-        }
-
-        float[,] svT = Mul3(vInvS, Transpose3(v));
-        float[,] u = Mul3(sigma, svT);
-
-        float detU = Determinant3(u);
-        float detV = Determinant3(v);
-        if (detU * detV < 0f)
-        {
-            for (int i = 0; i < 3; i++)
-                v[i, 2] = -v[i, 2];
-            for (int i = 0; i < 3; i++)
-            {
-                vInvS[i, 0] = v[i, 0] / s0;
-                vInvS[i, 1] = v[i, 1] / s1;
-                vInvS[i, 2] = v[i, 2] / s2;
-            }
-            svT = Mul3(vInvS, Transpose3(v));
-            u = Mul3(sigma, svT);
-        }
-
-        float[,] rMat = Mul3(u, Transpose3(v));
-        r = QuaternionFromOrthonormal(rMat);
-        t = meanA - r * meanB;
-    }
-
-    private static float[,] Mul3(float[,] a, float[,] b)
-    {
-        float[,] o = new float[3, 3];
-        for (int i = 0; i < 3; i++)
-            for (int j = 0; j < 3; j++)
-            {
-                float s = 0f;
-                for (int k = 0; k < 3; k++)
-                    s += a[i, k] * b[k, j];
-                o[i, j] = s;
-            }
-        return o;
-    }
-
-    private static float[,] Transpose3(float[,] m)
-    {
-        float[,] t = new float[3, 3];
-        for (int i = 0; i < 3; i++)
-            for (int j = 0; j < 3; j++)
-                t[i, j] = m[j, i];
-        return t;
-    }
-
-    private static float Determinant3(float[,] m)
-    {
-        return m[0, 0] * (m[1, 1] * m[2, 2] - m[1, 2] * m[2, 1])
-             - m[0, 1] * (m[1, 0] * m[2, 2] - m[1, 2] * m[2, 0])
-             + m[0, 2] * (m[1, 0] * m[2, 1] - m[1, 1] * m[2, 0]);
-    }
-
-    /// <summary>Jacobi eigen-decomposition for symmetric 3x3 (rows/cols 0..2).</summary>
-    private static void JacobiEigenSymmetric3(float[,] a, out float[] evals, out float[,] evecs)
-    {
-        float[,] d = (float[,])a.Clone();
-        evecs = new float[3, 3];
-        for (int i = 0; i < 3; i++) evecs[i, i] = 1f;
-
-        for (int sweep = 0; sweep < 32; sweep++)
-        {
-            float o01 = Mathf.Abs(d[0, 1]);
-            float o02 = Mathf.Abs(d[0, 2]);
-            float o12 = Mathf.Abs(d[1, 2]);
-            if (o01 < 1e-10f && o02 < 1e-10f && o12 < 1e-10f)
-                break;
-
-            int p = 0, q = 1;
-            float w = o01;
-            if (o02 > w) { p = 0; q = 2; w = o02; }
-            if (o12 > w) { p = 1; q = 2; }
-
-            float app = d[p, p];
-            float aqq = d[q, q];
-            float apq = d[p, q];
-            float phi = 0.5f * Mathf.Atan2(2f * apq, aqq - app);
-            float c = Mathf.Cos(phi);
-            float s = Mathf.Sin(phi);
-
-            float[,] j = new float[3, 3];
-            j[0, 0] = j[1, 1] = j[2, 2] = 1f;
-            j[p, p] = c;
-            j[q, q] = c;
-            j[p, q] = -s;
-            j[q, p] = s;
-
-            d = Mul3(Mul3(Transpose3(j), d), j);
-            evecs = Mul3(evecs, j);
-        }
-
-        evals = new float[3];
-        evals[0] = d[0, 0];
-        evals[1] = d[1, 1];
-        evals[2] = d[2, 2];
-    }
-
-    private static Quaternion QuaternionFromOrthonormal(float[,] r)
-    {
-        float tr = r[0, 0] + r[1, 1] + r[2, 2];
-        Quaternion q = Quaternion.identity;
-        if (tr > 0f)
-        {
-            float s = Mathf.Sqrt(tr + 1f) * 2f;
-            q.w = 0.25f * s;
-            q.x = (r[2, 1] - r[1, 2]) / s;
-            q.y = (r[0, 2] - r[2, 0]) / s;
-            q.z = (r[1, 0] - r[0, 1]) / s;
-        }
-        else if (r[0, 0] > r[1, 1] && r[0, 0] > r[2, 2])
-        {
-            float s = Mathf.Sqrt(1f + r[0, 0] - r[1, 1] - r[2, 2]) * 2f;
-            q.w = (r[2, 1] - r[1, 2]) / s;
-            q.x = 0.25f * s;
-            q.y = (r[0, 1] + r[1, 0]) / s;
-            q.z = (r[0, 2] + r[2, 0]) / s;
-        }
-        else if (r[1, 1] > r[2, 2])
-        {
-            float s = Mathf.Sqrt(1f + r[1, 1] - r[0, 0] - r[2, 2]) * 2f;
-            q.w = (r[0, 2] - r[2, 0]) / s;
-            q.x = (r[0, 1] + r[1, 0]) / s;
-            q.y = 0.25f * s;
-            q.z = (r[1, 2] + r[2, 1]) / s;
-        }
-        else
-        {
-            float s = Mathf.Sqrt(1f + r[2, 2] - r[0, 0] - r[1, 1]) * 2f;
-            q.w = (r[1, 0] - r[0, 1]) / s;
-            q.x = (r[0, 2] + r[2, 0]) / s;
-            q.y = (r[1, 2] + r[2, 1]) / s;
-            q.z = 0.25f * s;
-        }
-        return q.normalized;
-    }
-
-    private static Quaternion RotationFromUpper3x3(Matrix4x4 m)
-    {
-        float[,] r =
-        {
-            { m.m00, m.m01, m.m02 },
-            { m.m10, m.m11, m.m12 },
-            { m.m20, m.m21, m.m22 }
-        };
-        Orthonormalize(ref r);
-        return QuaternionFromOrthonormal(r);
-    }
-
-    private static void Orthonormalize(ref float[,] r)
-    {
-        Vector3 c0 = new Vector3(r[0, 0], r[1, 0], r[2, 0]);
-        Vector3 c1 = new Vector3(r[0, 1], r[1, 1], r[2, 1]);
-        Vector3 c2 = new Vector3(r[0, 2], r[1, 2], r[2, 2]);
-        c0.Normalize();
-        c1 = Vector3.ProjectOnPlane(c1, c0).normalized;
-        c2 = Vector3.Cross(c0, c1);
-        r[0, 0] = c0.x; r[1, 0] = c0.y; r[2, 0] = c0.z;
-        r[0, 1] = c1.x; r[1, 1] = c1.y; r[2, 1] = c1.z;
-        r[0, 2] = c2.x; r[1, 2] = c2.y; r[2, 2] = c2.z;
-    }
-
-    private bool BuildWorldPoints(MeshFilter mf, List<Vector3> worldOut)
-    {
-        worldOut.Clear();
-        _scratchVerts.Clear();
-        if (mf.sharedMesh == null)
-            return false;
-
-        mf.sharedMesh.GetVertices(_scratchVerts);
-        int stride = sampleStride < 1 ? 1 : sampleStride;
-        int added = 0;
-        for (int i = 0; i < _scratchVerts.Count && added < maxPointsPerCloud; i += stride)
-        {
-            Vector3 local = _scratchVerts[i];
-            if (local.z < minDepthMeters || local.z > maxDepthMeters)
-                continue;
-            worldOut.Add(mf.transform.TransformPoint(local));
-            added++;
-        }
-        return worldOut.Count >= 32;
-    }
-
-    private static Vector3 Mean(List<Vector3> pts)
-    {
-        Vector3 s = Vector3.zero;
-        for (int i = 0; i < pts.Count; i++)
-            s += pts[i];
-        return s / Mathf.Max(1, pts.Count);
-    }
-
-    private void BuildNearestPairs(List<Vector3> cloudA, List<Vector3> cloudB, float maxDist)
-    {
-        _pairedA.Clear();
-        _pairedB.Clear();
-        float maxSq = maxDist * maxDist;
-
-        for (int i = 0; i < cloudB.Count; i++)
-        {
-            Vector3 pb = cloudB[i];
-            int best = -1;
-            float bestSq = float.MaxValue;
-            for (int j = 0; j < cloudA.Count; j++)
-            {
-                float d = (cloudA[j] - pb).sqrMagnitude;
-                if (d < bestSq)
+                int nearest = FindNearest(grid, srcA, transformedB[i], adaptMaxDist, adaptMaxDistSq);
+                if (nearest >= 0)
                 {
-                    bestSq = d;
-                    best = j;
+                    matchA[matchCount] = nearest;
+                    matchB[matchCount] = i;
+                    matchCount++;
                 }
             }
-            if (best >= 0 && bestSq <= maxSq)
+
+            if (matchCount < 10)
             {
-                _pairedB.Add(pb);
-                _pairedA.Add(cloudA[best]);
+                Debug.Log($"[AutoAlign] Iter {iter}: only {matchCount} pairs, stopping.");
+                break;
             }
+
+            float cax = 0, cay = 0, caz = 0;
+            float cbx = 0, cby = 0, cbz = 0;
+            for (int i = 0; i < matchCount; i++)
+            {
+                cax += srcA[matchA[i]].x; cay += srcA[matchA[i]].y; caz += srcA[matchA[i]].z;
+                cbx += srcB[matchB[i]].x; cby += srcB[matchB[i]].y; cbz += srcB[matchB[i]].z;
+            }
+            float invN = 1f / matchCount;
+            cax *= invN; cay *= invN; caz *= invN;
+            cbx *= invN; cby *= invN; cbz *= invN;
+
+            float Sxx = 0, Sxy = 0, Sxz = 0;
+            float Syx = 0, Syy = 0, Syz = 0;
+            float Szx = 0, Szy = 0, Szz = 0;
+
+            for (int i = 0; i < matchCount; i++)
+            {
+                float bx = srcB[matchB[i]].x - cbx;
+                float by = srcB[matchB[i]].y - cby;
+                float bz = srcB[matchB[i]].z - cbz;
+                float ax = srcA[matchA[i]].x - cax;
+                float ay = srcA[matchA[i]].y - cay;
+                float az = srcA[matchA[i]].z - caz;
+
+                Sxx += bx * ax; Sxy += bx * ay; Sxz += bx * az;
+                Syx += by * ax; Syy += by * ay; Syz += by * az;
+                Szx += bz * ax; Szy += bz * ay; Szz += bz * az;
+            }
+
+            Quaternion optRot = HornQuaternion(Sxx, Sxy, Sxz, Syx, Syy, Syz, Szx, Szy, Szz, currentRot);
+            var rc = RotatePoint(optRot, new Vector3(cbx, cby, cbz));
+            Vector3 optTrans = new Vector3(cax - rc.x, cay - rc.y, caz - rc.z);
+
+            currentRot = QuatSlerp(currentRot, optRot, rate);
+            currentRot = NormalizeQuat(currentRot);
+            currentTrans = new Vector3(
+                currentTrans.x + rate * (optTrans.x - currentTrans.x),
+                currentTrans.y + rate * (optTrans.y - currentTrans.y),
+                currentTrans.z + rate * (optTrans.z - currentTrans.z)
+            );
+
+            float error = 0;
+            for (int i = 0; i < matchCount; i++)
+            {
+                var tb = RotatePoint(currentRot, srcB[matchB[i]]) + currentTrans;
+                float dx = srcA[matchA[i]].x - tb.x;
+                float dy = srcA[matchA[i]].y - tb.y;
+                float dz = srcA[matchA[i]].z - tb.z;
+                error += Mathf.Sqrt(dx * dx + dy * dy + dz * dz);
+            }
+            error /= matchCount;
+            lastError = error;
+            lastPairCount = matchCount;
+
+            if (iter > 3 && error < 0.001f) break;
         }
+
+        sw.Stop();
+        Debug.Log($"[AutoAlign] ICP done in {sw.ElapsedMilliseconds}ms. Before={errorBefore:F4}m, After={lastError:F4}m, pairs={lastPairCount}");
+
+        beforeMeanError = errorBefore;
+        resultMeanError = lastError;
+        resultPairCount = lastPairCount;
+        resultQuaternion = currentRot;
+        resultTranslation = currentTrans;
+
+        // Safety: only accept if alignment actually improved
+        bool improved = lastError < errorBefore * (1f - minImprove);
+        resultAccepted = improved;
+        resultReady = true;
     }
 
-    private static float Component(Vector3 v, int i)
+    private float ComputeAlignmentError(Vector3[] srcA, Vector3[] srcB, Vector3 trans, Quaternion rot, float maxDist)
     {
-        if (i == 0) return v.x;
-        if (i == 1) return v.y;
-        return v.z;
+        float maxDistSq = maxDist * maxDist;
+        var grid = BuildSpatialGrid(srcA, maxDist);
+        float totalDist = 0;
+        int count = 0;
+
+        for (int i = 0; i < srcB.Length; i++)
+        {
+            var pb = RotatePoint(rot, srcB[i]) + trans;
+            int nearest = FindNearest(grid, srcA, pb, maxDist, maxDistSq);
+            if (nearest < 0) continue;
+
+            float dx = srcA[nearest].x - pb.x;
+            float dy = srcA[nearest].y - pb.y;
+            float dz = srcA[nearest].z - pb.z;
+            totalDist += Mathf.Sqrt(dx * dx + dy * dy + dz * dz);
+            count++;
+        }
+
+        return count > 0 ? totalDist / count : float.MaxValue;
     }
+
+    #region Horn's Quaternion Method
+
+    private static Quaternion HornQuaternion(
+        float Sxx, float Sxy, float Sxz,
+        float Syx, float Syy, float Syz,
+        float Szx, float Szy, float Szz,
+        Quaternion initialGuess)
+    {
+        float n00 = Sxx + Syy + Szz;
+        float n01 = Syz - Szy;
+        float n02 = Szx - Sxz;
+        float n03 = Sxy - Syx;
+        float n11 = Sxx - Syy - Szz;
+        float n12 = Sxy + Syx;
+        float n13 = Szx + Sxz;
+        float n22 = -Sxx + Syy - Szz;
+        float n23 = Syz + Szy;
+        float n33 = -Sxx - Syy + Szz;
+
+        float v0 = initialGuess.w;
+        float v1 = initialGuess.x;
+        float v2 = initialGuess.y;
+        float v3 = initialGuess.z;
+
+        for (int i = 0; i < 30; i++)
+        {
+            float t0 = n00 * v0 + n01 * v1 + n02 * v2 + n03 * v3;
+            float t1 = n01 * v0 + n11 * v1 + n12 * v2 + n13 * v3;
+            float t2 = n02 * v0 + n12 * v1 + n22 * v2 + n23 * v3;
+            float t3 = n03 * v0 + n13 * v1 + n23 * v2 + n33 * v3;
+
+            float len = Mathf.Sqrt(t0 * t0 + t1 * t1 + t2 * t2 + t3 * t3);
+            if (len < 1e-10f) break;
+            float inv = 1f / len;
+            v0 = t0 * inv; v1 = t1 * inv; v2 = t2 * inv; v3 = t3 * inv;
+        }
+
+        if (v0 < 0) { v0 = -v0; v1 = -v1; v2 = -v2; v3 = -v3; }
+        return new Quaternion(v1, v2, v3, v0);
+    }
+
+    #endregion
+
+    #region Spatial Hash Grid
+
+    private const float GRID_CELL_MULTIPLIER = 2f;
+
+    private Dictionary<long, List<int>> BuildSpatialGrid(Vector3[] points, float cellSize)
+    {
+        float cs = cellSize * GRID_CELL_MULTIPLIER;
+        float inv = 1f / cs;
+        var grid = new Dictionary<long, List<int>>(points.Length);
+        for (int i = 0; i < points.Length; i++)
+        {
+            long key = CellKey(points[i], inv);
+            if (!grid.TryGetValue(key, out var list))
+            {
+                list = new List<int>(4);
+                grid[key] = list;
+            }
+            list.Add(i);
+        }
+        return grid;
+    }
+
+    private int FindNearest(Dictionary<long, List<int>> grid, Vector3[] points, Vector3 query, float cellSize, float maxDistSq)
+    {
+        float cs = cellSize * GRID_CELL_MULTIPLIER;
+        float inv = 1f / cs;
+        int cx = Mathf.FloorToInt(query.x * inv);
+        int cy = Mathf.FloorToInt(query.y * inv);
+        int cz = Mathf.FloorToInt(query.z * inv);
+
+        float bestDistSq = maxDistSq;
+        int bestIdx = -1;
+
+        for (int dx = -1; dx <= 1; dx++)
+        for (int dy = -1; dy <= 1; dy++)
+        for (int dz = -1; dz <= 1; dz++)
+        {
+            long key = PackKey(cx + dx, cy + dy, cz + dz);
+            if (!grid.TryGetValue(key, out var list)) continue;
+            for (int li = 0; li < list.Count; li++)
+            {
+                int idx = list[li];
+                float ddx = points[idx].x - query.x;
+                float ddy = points[idx].y - query.y;
+                float ddz = points[idx].z - query.z;
+                float dSq = ddx * ddx + ddy * ddy + ddz * ddz;
+                if (dSq < bestDistSq) { bestDistSq = dSq; bestIdx = idx; }
+            }
+        }
+        return bestIdx;
+    }
+
+    private static long CellKey(Vector3 p, float inv)
+    {
+        return PackKey(Mathf.FloorToInt(p.x * inv), Mathf.FloorToInt(p.y * inv), Mathf.FloorToInt(p.z * inv));
+    }
+
+    private static long PackKey(int x, int y, int z)
+    {
+        return ((long)(x & 0x1FFFFF) << 42) | ((long)(y & 0x1FFFFF) << 21) | (long)(z & 0x1FFFFF);
+    }
+
+    #endregion
+
+    #region Thread-Safe Math
+
+    private static Vector3 RotatePoint(Quaternion q, Vector3 v)
+    {
+        float qx2 = q.x + q.x, qy2 = q.y + q.y, qz2 = q.z + q.z;
+        float xx = q.x * qx2, yy = q.y * qy2, zz = q.z * qz2;
+        float xy = q.x * qy2, xz = q.x * qz2, yz = q.y * qz2;
+        float wx = q.w * qx2, wy = q.w * qy2, wz = q.w * qz2;
+        return new Vector3(
+            (1f - yy - zz) * v.x + (xy - wz) * v.y + (xz + wy) * v.z,
+            (xy + wz) * v.x + (1f - xx - zz) * v.y + (yz - wx) * v.z,
+            (xz - wy) * v.x + (yz + wx) * v.y + (1f - xx - yy) * v.z
+        );
+    }
+
+    private static Quaternion QuatSlerp(Quaternion a, Quaternion b, float t)
+    {
+        float dot = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+        if (dot < 0f) { b = new Quaternion(-b.x, -b.y, -b.z, -b.w); dot = -dot; }
+        if (dot > 0.9999f)
+        {
+            float rx = a.x + t * (b.x - a.x), ry = a.y + t * (b.y - a.y);
+            float rz = a.z + t * (b.z - a.z), rw = a.w + t * (b.w - a.w);
+            float len = Mathf.Sqrt(rx * rx + ry * ry + rz * rz + rw * rw);
+            float inv = 1f / len;
+            return new Quaternion(rx * inv, ry * inv, rz * inv, rw * inv);
+        }
+        float theta = Mathf.Acos(dot);
+        float sinT = Mathf.Sin(theta);
+        float wa = Mathf.Sin((1f - t) * theta) / sinT;
+        float wb = Mathf.Sin(t * theta) / sinT;
+        return new Quaternion(wa * a.x + wb * b.x, wa * a.y + wb * b.y, wa * a.z + wb * b.z, wa * a.w + wb * b.w);
+    }
+
+    private static Quaternion NormalizeQuat(Quaternion q)
+    {
+        float len = Mathf.Sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+        if (len < 1e-10f) return new Quaternion(0, 0, 0, 1);
+        float inv = 1f / len;
+        return new Quaternion(q.x * inv, q.y * inv, q.z * inv, q.w * inv);
+    }
+
+    #endregion
 }

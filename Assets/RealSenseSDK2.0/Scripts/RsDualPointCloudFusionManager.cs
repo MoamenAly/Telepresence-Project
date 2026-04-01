@@ -1,229 +1,323 @@
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.Rendering;
 
-/// <summary>
-/// Shared fusion controller for dual RealSense point clouds.
-/// - Computes one dominant person cluster center from camera A + B clouds.
-/// - Applies the same world ROI center to both filters.
-/// - Optionally keeps camera B transform in sync from dual-camera rig.
-/// </summary>
-[DefaultExecutionOrder(900)]
+[DefaultExecutionOrder(200)]
+[RequireComponent(typeof(MeshFilter), typeof(MeshRenderer))]
 public class RsDualPointCloudFusionManager : MonoBehaviour
 {
-    [Header("Cloud Inputs")]
-    public MeshFilter pointCloudMeshA;
-    public MeshFilter pointCloudMeshB;
+    [Header("Source Clouds")]
+    public MeshFilter meshFilterA;
+    public MeshFilter meshFilterB;
 
-    [Header("ROI Targets")]
-    public RsPointCloudRoiFilter roiFilterA;
-    public RsPointCloudRoiFilter roiFilterB;
+    [Header("Extrinsics")]
+    public RsDualCameraExtrinsicsCalibration calibration;
 
-    [Header("Optional Rig Sync")]
-    public RsDualCameraPointCloudRig rig;
-    public bool applyRigTransformEachFrame = true;
+    [Header("Fusion Settings")]
+    [Tooltip("Hide the individual PointCloud_A / B renderers and show only the fused mesh.")]
+    public bool hideSeparateClouds = true;
 
-    [Header("Enable")]
-    public bool fusionEnabled = true;
+    [Tooltip("Voxel grid cell size (meters) for merging overlapping points. " +
+             "Points from both clouds in the same voxel are averaged. 0 = no merging.")]
+    public float voxelSize = 0.005f;
 
-    [Header("Detection Gate (local camera space)")]
-    [Min(0.01f)] public float minDepthMeters = 0.45f;
-    [Min(0.02f)] public float maxDepthMeters = 2.5f;
-    public Vector2 localYRange = new Vector2(0.1f, 2.2f);
-    [Min(1)] public int sampleStride = 4;
+    [Tooltip("Maximum number of points in the merged cloud.")]
+    public int maxMergedPoints = 307200;
 
-    [Header("Cluster Selection")]
-    [Min(0.02f)] public float xzCellSize = 0.12f;
-    [Min(0.05f)] public float clusterRadiusMeters = 0.45f;
-    [Min(1)] public int minClusterPoints = 180;
+    private Mesh fusedMesh;
+    private Vector3[] mergedVerts;
+    private Vector2[] mergedGridUVs;
+    private Vector2[] mergedCloudIds;
+    private int[] mergedIndices;
 
-    [Header("Center Smoothing")]
-    public float yOffset = 0f;
-    [Min(0.01f)] public float smoothing = 8f;
-    [Min(0.01f)] public float maxMoveSpeed = 2.0f;
+    private MeshRenderer rendererA;
+    private MeshRenderer rendererB;
+    private MeshRenderer fusedRenderer;
+    private Material fusedMaterial;
 
-    [Header("ROI Consistency")]
-    [Tooltip("Use ROI-A size for both A and B.")]
-    public bool forceSameRoiSize = true;
-    [Tooltip("Use ROI-A depth gate for both A and B.")]
-    public bool forceSameRoiDepth = true;
-
-    [Header("Debug")]
-    public bool drawDetectedCenter = true;
-
-    private readonly List<Vector3> _vertsA = new List<Vector3>(640 * 480);
-    private readonly List<Vector3> _vertsB = new List<Vector3>(640 * 480);
-    private readonly Dictionary<int, int> _cellCounts = new Dictionary<int, int>(2048);
-    private Vector3 _lastDetectedCenter;
-    private bool _hasDetectedCenter;
-
-    private void LateUpdate()
+    private struct VoxelAccum
     {
-        if (!fusionEnabled)
-            return;
-        if (pointCloudMeshA == null || pointCloudMeshB == null || roiFilterA == null || roiFilterB == null)
-            return;
+        public float sumX, sumY, sumZ;
+        public int totalCount;
+        public Vector2 uvA;
+        public Vector2 uvB;
+        public bool hasA, hasB;
+    }
 
-        if (applyRigTransformEachFrame && rig != null)
-            rig.ApplyTransforms();
+    private Dictionary<long, VoxelAccum> voxelGrid;
 
-        if (forceSameRoiSize)
-            roiFilterB.worldSize = roiFilterA.worldSize;
+    void Start()
+    {
+        fusedMesh = new Mesh { indexFormat = IndexFormat.UInt32 };
+        fusedMesh.MarkDynamic();
+        GetComponent<MeshFilter>().sharedMesh = fusedMesh;
 
-        if (forceSameRoiDepth)
+        fusedRenderer = GetComponent<MeshRenderer>();
+        if (meshFilterA != null) rendererA = meshFilterA.GetComponent<MeshRenderer>();
+        if (meshFilterB != null) rendererB = meshFilterB.GetComponent<MeshRenderer>();
+
+        mergedVerts = new Vector3[maxMergedPoints];
+        mergedGridUVs = new Vector2[maxMergedPoints];
+        mergedCloudIds = new Vector2[maxMergedPoints];
+        mergedIndices = new int[maxMergedPoints];
+        for (int i = 0; i < maxMergedPoints; i++)
+            mergedIndices[i] = i;
+
+        voxelGrid = new Dictionary<long, VoxelAccum>(maxMergedPoints);
+
+        CreateFusedMaterial();
+    }
+
+    private void CreateFusedMaterial()
+    {
+        var shader = Shader.Find("Custom/PointCloudFused");
+        if (shader == null)
         {
-            roiFilterB.minDepthMeters = roiFilterA.minDepthMeters;
-            roiFilterB.maxDepthMeters = roiFilterA.maxDepthMeters;
+            Debug.LogError("[Fusion] 'Custom/PointCloudFused' shader not found. " +
+                           "Make sure PointCloudFused.shader exists in Assets/RealSenseSDK2.0/Shaders/");
+            enabled = false;
+            return;
         }
 
-        var meshA = pointCloudMeshA.sharedMesh;
-        var meshB = pointCloudMeshB.sharedMesh;
-        if (meshA == null || meshB == null)
-            return;
+        fusedMaterial = new Material(shader);
+        fusedMaterial.SetFloat("_PointSize", 10.0f);
+        fusedMaterial.EnableKeyword("USE_DISTANCE");
+        fusedMaterial.SetColor("_Color", Color.white);
+        fusedRenderer.sharedMaterial = fusedMaterial;
+    }
 
-        _vertsA.Clear();
-        _vertsB.Clear();
-        meshA.GetVertices(_vertsA);
-        meshB.GetVertices(_vertsB);
-        if (_vertsA.Count == 0 && _vertsB.Count == 0)
-            return;
+    void LateUpdate()
+    {
+        if (meshFilterA == null || meshFilterB == null) return;
+        if (fusedMaterial == null) return;
 
-        int stride = sampleStride < 1 ? 1 : sampleStride;
-        float cellSize = xzCellSize < 0.02f ? 0.02f : xzCellSize;
+        var meshA = meshFilterA.sharedMesh ?? meshFilterA.mesh;
+        var meshB = meshFilterB.sharedMesh ?? meshFilterB.mesh;
+        if (meshA == null || meshB == null) return;
+        if (meshA.vertexCount == 0 && meshB.vertexCount == 0) return;
 
-        _cellCounts.Clear();
-        int bestKey = 0;
-        int bestCount = 0;
+        UpdateShaderTextures();
 
-        AccumulateCells(_vertsA, pointCloudMeshA.transform, stride, cellSize, ref bestKey, ref bestCount);
-        AccumulateCells(_vertsB, pointCloudMeshB.transform, stride, cellSize, ref bestKey, ref bestCount);
-        if (bestCount == 0)
-            return;
+        var vertsA = meshA.vertices;
+        var vertsB = meshB.vertices;
+        var gridUVsA = meshA.uv;
+        var gridUVsB = meshB.uv;
 
-        UnpackCell(bestKey, out int bestCx, out int bestCz);
-        Vector3 bestCellCenter = new Vector3(
-            (bestCx + 0.5f) * cellSize,
-            0f,
-            (bestCz + 0.5f) * cellSize
+        Matrix4x4 transformB = Matrix4x4.TRS(
+            calibration != null ? calibration.translationOffset : Vector3.zero,
+            Quaternion.Euler(calibration != null ? calibration.rotationEulerOffset : Vector3.zero),
+            Vector3.one
         );
 
-        float radiusSqr = clusterRadiusMeters * clusterRadiusMeters;
-        Vector3 sum = Vector3.zero;
-        int clusterCount = 0;
-
-        AccumulateCluster(_vertsA, pointCloudMeshA.transform, stride, bestCellCenter, radiusSqr, ref sum, ref clusterCount);
-        AccumulateCluster(_vertsB, pointCloudMeshB.transform, stride, bestCellCenter, radiusSqr, ref sum, ref clusterCount);
-
-        if (clusterCount < minClusterPoints)
-            return;
-
-        Vector3 detectedCenter = sum / clusterCount;
-        detectedCenter.y += yOffset;
-        _lastDetectedCenter = detectedCenter;
-        _hasDetectedCenter = true;
-
-        Vector3 current = roiFilterA.worldCenter;
-        float t = 1f - Mathf.Exp(-smoothing * Time.deltaTime);
-        Vector3 smoothed = Vector3.Lerp(current, detectedCenter, t);
-        Vector3 delta = smoothed - current;
-        float maxStep = maxMoveSpeed * Time.deltaTime;
-        if (delta.magnitude > maxStep)
-            smoothed = current + delta.normalized * maxStep;
-
-        roiFilterA.worldCenter = smoothed;
-        roiFilterB.worldCenter = smoothed;
+        int count = MergeVerticesVoxelAvg(vertsA, gridUVsA, vertsB, gridUVsB, transformB);
+        UpdateFusedMesh(count);
+        UpdateCloudVisibility();
     }
 
-    [ContextMenu("Copy A ROI Params To B")]
-    public void CopyRoiASettingsToB()
+    private void UpdateShaderTextures()
     {
-        if (roiFilterA == null || roiFilterB == null)
-            return;
-
-        roiFilterB.worldSize = roiFilterA.worldSize;
-        roiFilterB.minDepthMeters = roiFilterA.minDepthMeters;
-        roiFilterB.maxDepthMeters = roiFilterA.maxDepthMeters;
-    }
-
-    private void AccumulateCells(
-        List<Vector3> vertices,
-        Transform cloudTransform,
-        int stride,
-        float cellSize,
-        ref int bestKey,
-        ref int bestCount)
-    {
-        for (int i = 0; i < vertices.Count; i += stride)
+        if (rendererA != null && rendererA.sharedMaterial != null)
         {
-            Vector3 local = vertices[i];
-            if (local.z < minDepthMeters || local.z > maxDepthMeters)
-                continue;
-            if (local.y < localYRange.x || local.y > localYRange.y)
-                continue;
+            var matA = rendererA.sharedMaterial;
+            fusedMaterial.SetTexture("_UVMapA", matA.GetTexture("_UVMap"));
+            fusedMaterial.SetTexture("_MainTexA", matA.GetTexture("_MainTex"));
+        }
 
-            Vector3 world = cloudTransform.TransformPoint(local);
-            int cx = Mathf.FloorToInt(world.x / cellSize);
-            int cz = Mathf.FloorToInt(world.z / cellSize);
-            int key = PackCell(cx, cz);
+        if (rendererB != null && rendererB.sharedMaterial != null)
+        {
+            var matB = rendererB.sharedMaterial;
+            fusedMaterial.SetTexture("_UVMapB", matB.GetTexture("_UVMap"));
+            fusedMaterial.SetTexture("_MainTexB", matB.GetTexture("_MainTex"));
+        }
+    }
 
-            int count;
-            if (_cellCounts.TryGetValue(key, out count))
-                count++;
-            else
-                count = 1;
+    private int MergeVerticesVoxelAvg(Vector3[] vertsA, Vector2[] uvsA,
+                                      Vector3[] vertsB, Vector2[] uvsB,
+                                      Matrix4x4 transformB)
+    {
+        bool useGrid = voxelSize > 0;
 
-            _cellCounts[key] = count;
-            if (count > bestCount)
+        if (!useGrid)
+            return MergeVerticesSimple(vertsA, uvsA, vertsB, uvsB, transformB);
+
+        float invCell = 1f / voxelSize;
+        voxelGrid.Clear();
+
+        // Pass 1: Accumulate Cloud A points into voxel grid
+        for (int i = 0; i < vertsA.Length; i++)
+        {
+            var v = vertsA[i];
+            if (v.x == 0 && v.y == 0 && v.z == 0) continue;
+
+            long key = SpatialKey(v, invCell);
+            Vector2 uv = (uvsA != null && i < uvsA.Length) ? uvsA[i] : Vector2.zero;
+
+            if (voxelGrid.TryGetValue(key, out var acc))
             {
-                bestCount = count;
-                bestKey = key;
+                acc.sumX += v.x;
+                acc.sumY += v.y;
+                acc.sumZ += v.z;
+                acc.totalCount++;
+                acc.uvA = uv;
+                acc.hasA = true;
+                voxelGrid[key] = acc;
+            }
+            else
+            {
+                voxelGrid[key] = new VoxelAccum
+                {
+                    sumX = v.x, sumY = v.y, sumZ = v.z,
+                    totalCount = 1,
+                    uvA = uv,
+                    hasA = true
+                };
             }
         }
-    }
 
-    private void AccumulateCluster(
-        List<Vector3> vertices,
-        Transform cloudTransform,
-        int stride,
-        Vector3 bestCellCenter,
-        float radiusSqr,
-        ref Vector3 sum,
-        ref int clusterCount)
-    {
-        for (int i = 0; i < vertices.Count; i += stride)
+        // Pass 2: Accumulate Cloud B points (transformed) into the same grid
+        for (int i = 0; i < vertsB.Length; i++)
         {
-            Vector3 local = vertices[i];
-            if (local.z < minDepthMeters || local.z > maxDepthMeters)
-                continue;
-            if (local.y < localYRange.x || local.y > localYRange.y)
-                continue;
+            var v = vertsB[i];
+            if (v.x == 0 && v.y == 0 && v.z == 0) continue;
 
-            Vector3 world = cloudTransform.TransformPoint(local);
-            Vector2 dxz = new Vector2(world.x - bestCellCenter.x, world.z - bestCellCenter.z);
-            if (dxz.sqrMagnitude > radiusSqr)
-                continue;
+            v = transformB.MultiplyPoint3x4(v);
 
-            sum += world;
-            clusterCount++;
+            long key = SpatialKey(v, invCell);
+            Vector2 uv = (uvsB != null && i < uvsB.Length) ? uvsB[i] : Vector2.zero;
+
+            if (voxelGrid.TryGetValue(key, out var acc))
+            {
+                acc.sumX += v.x;
+                acc.sumY += v.y;
+                acc.sumZ += v.z;
+                acc.totalCount++;
+                acc.uvB = uv;
+                acc.hasB = true;
+                voxelGrid[key] = acc;
+            }
+            else
+            {
+                voxelGrid[key] = new VoxelAccum
+                {
+                    sumX = v.x, sumY = v.y, sumZ = v.z,
+                    totalCount = 1,
+                    uvB = uv,
+                    hasB = true
+                };
+            }
         }
+
+        // Pass 3: Emit one averaged point per occupied voxel
+        int idx = 0;
+        foreach (var kvp in voxelGrid)
+        {
+            if (idx >= maxMergedPoints) break;
+
+            var acc = kvp.Value;
+            float inv = 1f / acc.totalCount;
+            mergedVerts[idx] = new Vector3(acc.sumX * inv, acc.sumY * inv, acc.sumZ * inv);
+
+            if (acc.hasA && !acc.hasB)
+            {
+                mergedGridUVs[idx] = acc.uvA;
+                mergedCloudIds[idx] = new Vector2(0, 0);
+            }
+            else if (acc.hasB && !acc.hasA)
+            {
+                mergedGridUVs[idx] = acc.uvB;
+                mergedCloudIds[idx] = new Vector2(1, 0);
+            }
+            else
+            {
+                // Overlap: both clouds contributed -- use A as reference
+                mergedGridUVs[idx] = acc.uvA;
+                mergedCloudIds[idx] = new Vector2(0, 0);
+            }
+
+            idx++;
+        }
+
+        // Zero remaining slots
+        for (int i = idx; i < maxMergedPoints; i++)
+            mergedVerts[i] = Vector3.zero;
+
+        return idx;
     }
 
-    private static int PackCell(int x, int z)
+    /// <summary>
+    /// Simple concatenation when voxel merging is disabled (voxelSize = 0).
+    /// </summary>
+    private int MergeVerticesSimple(Vector3[] vertsA, Vector2[] uvsA,
+                                    Vector3[] vertsB, Vector2[] uvsB,
+                                    Matrix4x4 transformB)
     {
-        return (x << 16) ^ (z & 0xFFFF);
+        int idx = 0;
+
+        for (int i = 0; i < vertsA.Length && idx < maxMergedPoints; i++)
+        {
+            var v = vertsA[i];
+            if (v.x == 0 && v.y == 0 && v.z == 0) continue;
+            mergedVerts[idx] = v;
+            mergedGridUVs[idx] = (uvsA != null && i < uvsA.Length) ? uvsA[i] : Vector2.zero;
+            mergedCloudIds[idx] = new Vector2(0, 0);
+            idx++;
+        }
+
+        for (int i = 0; i < vertsB.Length && idx < maxMergedPoints; i++)
+        {
+            var v = vertsB[i];
+            if (v.x == 0 && v.y == 0 && v.z == 0) continue;
+            v = transformB.MultiplyPoint3x4(v);
+            mergedVerts[idx] = v;
+            mergedGridUVs[idx] = (uvsB != null && i < uvsB.Length) ? uvsB[i] : Vector2.zero;
+            mergedCloudIds[idx] = new Vector2(1, 0);
+            idx++;
+        }
+
+        for (int i = idx; i < maxMergedPoints; i++)
+            mergedVerts[i] = Vector3.zero;
+
+        return idx;
     }
 
-    private static void UnpackCell(int key, out int x, out int z)
+    private static long SpatialKey(Vector3 v, float invCell)
     {
-        x = key >> 16;
-        z = (short)(key & 0xFFFF);
+        int x = Mathf.FloorToInt(v.x * invCell);
+        int y = Mathf.FloorToInt(v.y * invCell);
+        int z = Mathf.FloorToInt(v.z * invCell);
+        return ((long)(x & 0x1FFFFF) << 42) | ((long)(y & 0x1FFFFF) << 21) | (long)(z & 0x1FFFFF);
     }
 
-    private void OnDrawGizmosSelected()
+    private void UpdateFusedMesh(int activeCount)
     {
-        if (!drawDetectedCenter || !_hasDetectedCenter)
-            return;
+        if (fusedMesh.vertexCount != maxMergedPoints)
+        {
+            fusedMesh.Clear();
+            fusedMesh.vertices = mergedVerts;
+            fusedMesh.uv = mergedGridUVs;
+            fusedMesh.uv2 = mergedCloudIds;
+            fusedMesh.SetIndices(mergedIndices, MeshTopology.Points, 0, false);
+            fusedMesh.bounds = new Bounds(Vector3.zero, Vector3.one * 10f);
+        }
+        else
+        {
+            fusedMesh.vertices = mergedVerts;
+            fusedMesh.uv = mergedGridUVs;
+            fusedMesh.uv2 = mergedCloudIds;
+        }
 
-        Gizmos.color = Color.cyan;
-        Gizmos.DrawSphere(_lastDetectedCenter, 0.06f);
+        fusedMesh.UploadMeshData(false);
+    }
+
+    private void UpdateCloudVisibility()
+    {
+        if (rendererA != null) rendererA.enabled = !hideSeparateClouds;
+        if (rendererB != null) rendererB.enabled = !hideSeparateClouds;
+    }
+
+    void OnDestroy()
+    {
+        if (fusedMesh != null) Destroy(fusedMesh);
+        if (fusedMaterial != null) Destroy(fusedMaterial);
     }
 }

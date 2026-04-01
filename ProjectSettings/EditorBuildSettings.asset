@@ -8,4 +8,7 @@ EditorBuildSettings:
   - enabled: 1
     path: Assets/RealSenseSDK2.0/Scenes/StartHere.unity
     guid: b58b736dcdf5e6d4dbe73d67853a2ace
+  - enabled: 1
+    path: Assets/RealSenseSDK2.0/Scenes/Main.unity
+    guid: 96d1a1b47f8f0d14ca627a19c9c7e02a
   m_configObjects: {}

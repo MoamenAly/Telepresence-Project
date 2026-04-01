@@ -1,77 +1,57 @@
 using UnityEngine;
 
-/// <summary>
-/// Minimal helper for two RealSense devices used in one point cloud view.
-/// It assigns camera serial numbers and applies camera B pose relative to camera A.
-/// </summary>
 public class RsDualCameraPointCloudRig : MonoBehaviour
 {
-    [Header("Devices")]
-    public RsDevice cameraA;
-    public RsDevice cameraB;
+    [Header("Device References")]
+    public RsDevice deviceA;
+    public RsDevice deviceB;
 
-    [Tooltip("Physical serial number for camera A.")]
-    public string cameraASerial = string.Empty;
+    [Header("Point Cloud Renderers")]
+    public RsPointCloudRenderer pointCloudA;
+    public RsPointCloudRenderer pointCloudB;
 
-    [Tooltip("Physical serial number for camera B.")]
-    public string cameraBSerial = string.Empty;
+    [Header("Calibration Transform")]
+    [Tooltip("The transform that extrinsics calibration will adjust (typically RsDevice_B).")]
+    public Transform deviceBTransform;
 
-    [Header("Point Cloud Roots")]
-    [Tooltip("Root transform of camera A point cloud. Usually left at identity.")]
-    public Transform pointCloudRootA;
-
-    [Tooltip("Root transform of camera B point cloud (this receives B->A transform).")]
-    public Transform pointCloudRootB;
-
-    [Header("Extrinsics (B relative to A)")]
-    [Tooltip("Translation in meters from camera A to camera B point cloud frame.")]
-    public Vector3 positionBInA = Vector3.zero;
-
-    [Tooltip("Rotation (Euler degrees) from camera B to camera A frame.")]
-    public Vector3 rotationBInAEuler = Vector3.zero;
-
-    [Header("Startup")]
-    [Tooltip("If true, applies serials and transforms automatically on Awake.")]
-    public bool applyOnAwake = true;
-
-    private void Awake()
+    void Awake()
     {
-        if (!applyOnAwake)
-            return;
-
-        ApplyConfiguration();
+        AutoDiscover();
+        Validate();
     }
 
-    [ContextMenu("Apply Dual Camera Configuration")]
-    public void ApplyConfiguration()
+    private void AutoDiscover()
     {
-        ApplySerials();
-        ApplyTransforms();
-    }
-
-    [ContextMenu("Apply Camera Serials")]
-    public void ApplySerials()
-    {
-        if (cameraA != null)
-            cameraA.DeviceConfiguration.RequestedSerialNumber = cameraASerial == null ? string.Empty : cameraASerial.Trim();
-
-        if (cameraB != null)
-            cameraB.DeviceConfiguration.RequestedSerialNumber = cameraBSerial == null ? string.Empty : cameraBSerial.Trim();
-    }
-
-    [ContextMenu("Apply Point Cloud Transforms")]
-    public void ApplyTransforms()
-    {
-        if (pointCloudRootA != null)
+        if (deviceA == null || deviceB == null)
         {
-            pointCloudRootA.localPosition = Vector3.zero;
-            pointCloudRootA.localRotation = Quaternion.identity;
+            var devices = GetComponentsInChildren<RsDevice>(true);
+            if (devices.Length >= 2)
+            {
+                if (deviceA == null) deviceA = devices[0];
+                if (deviceB == null) deviceB = devices[1];
+            }
         }
 
-        if (pointCloudRootB != null)
+        if (pointCloudA == null || pointCloudB == null)
         {
-            pointCloudRootB.localPosition = positionBInA;
-            pointCloudRootB.localRotation = Quaternion.Euler(rotationBInAEuler);
+            var renderers = GetComponentsInChildren<RsPointCloudRenderer>(true);
+            if (renderers.Length >= 2)
+            {
+                if (pointCloudA == null) pointCloudA = renderers[0];
+                if (pointCloudB == null) pointCloudB = renderers[1];
+            }
         }
+
+        if (deviceBTransform == null && deviceB != null)
+            deviceBTransform = deviceB.transform;
+    }
+
+    private void Validate()
+    {
+        if (deviceA == null) Debug.LogError("[DualRig] deviceA reference is missing.", this);
+        if (deviceB == null) Debug.LogError("[DualRig] deviceB reference is missing.", this);
+        if (pointCloudA == null) Debug.LogError("[DualRig] pointCloudA reference is missing.", this);
+        if (pointCloudB == null) Debug.LogError("[DualRig] pointCloudB reference is missing.", this);
+        if (deviceBTransform == null) Debug.LogError("[DualRig] deviceBTransform reference is missing.", this);
     }
 }
