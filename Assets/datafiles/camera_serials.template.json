@@ -1,0 +1,6 @@
+{
+  "cameraA": "ENTER_D455_SERIAL_A",
+  "cameraB": "ENTER_D455_SERIAL_B",
+  "layoutMode": "side_by_side",
+  "pointCloudRootBOffsetX": 0.75
+}
