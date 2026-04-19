@@ -380,10 +380,16 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   cameraA: {fileID: 1501}
   cameraB: {fileID: 1511}
+  cameraAPipe: {fileID: 1601}
+  cameraBPipe: {fileID: 1611}
   pointCloudRootA: {fileID: 1302}
   pointCloudRootB: {fileID: 1402}
   cameraASerial: 419222300508
   cameraBSerial: 409122300736
+  cameraAMinDistance: 0.28
+  cameraAMaxDistance: 1.55
+  cameraBMinDistance: 0.28
+  cameraBMaxDistance: 1.55
 --- !u!1 &1301
 GameObject:
   m_ObjectHideFlags: 0
@@ -805,7 +811,7 @@ PrefabInstance:
         type: 3}
       propertyPath: profile
       value: 
-      objectReference: {fileID: 11400000, guid: f5b0f2c5908cd7140acd24ad517229da,
+      objectReference: {fileID: 11400000, guid: 965a4e6b0e744a628f53e87fc511f4d6,
         type: 2}
     m_RemovedComponents: []
     m_RemovedGameObjects: []
@@ -883,7 +889,7 @@ PrefabInstance:
         type: 3}
       propertyPath: profile
       value: 
-      objectReference: {fileID: 11400000, guid: f5b0f2c5908cd7140acd24ad517229da,
+      objectReference: {fileID: 11400000, guid: e713032e2822409e9c675fd0866d5bfd,
         type: 2}
     m_RemovedComponents: []
     m_RemovedGameObjects: []
