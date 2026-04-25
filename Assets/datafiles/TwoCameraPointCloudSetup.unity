@@ -386,10 +386,22 @@ MonoBehaviour:
   pointCloudRootB: {fileID: 1402}
   cameraASerial: 419222300508
   cameraBSerial: 409122300736
-  cameraAMinDistance: 0.28
-  cameraAMaxDistance: 1.55
-  cameraBMinDistance: 0.28
-  cameraBMaxDistance: 1.55
+  cameraAMinDistance: 0.2
+  cameraAMaxDistance: 0.8
+  cameraBMinDistance: 0.2
+  cameraBMaxDistance: 0.8
+  useSymmetricStartingLayout: 1
+  baselineMeters: 0.5
+  toeInYawDegrees: 7.15
+  cameraAIsLeft: 1
+  cameraBPositionInA: {x: 0.49611184, y: 0, z: 0.0622337}
+  cameraBRotationInAEuler: {x: 0, y: 345.7, z: 0}
+  autoCalibrationStartsFromSymmetricGuess: 1
+  autoCalibrationMaxPoints: 1500
+  autoCalibrationVoxelSize: 0.02
+  autoCalibrationMaxCorrespondenceDistance: 0.06
+  autoCalibrationIterations: 12
+  autoCalibrationStatus: Idle
 --- !u!1 &1301
 GameObject:
   m_ObjectHideFlags: 0
@@ -435,8 +447,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: dd7488bd6f553104fb95d0c5c15d4ad9, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  device: {fileID: 0}
-  pointCloudMeshRenderer: {fileID: 0}
+  device: {fileID: 1501}
+  pointCloudMeshRenderer: {fileID: 1273587900}
 --- !u!1 &1401
 GameObject:
   m_ObjectHideFlags: 0
@@ -462,8 +474,8 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1401}
   serializedVersion: 2
-  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0.75, y: 0, z: 0}
+  m_LocalRotation: {x: 0, y: 0.12446742, z: 0, w: -0.9922237}
+  m_LocalPosition: {x: 0.49611184, y: 0, z: 0.0622337}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children:
@@ -482,8 +494,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: dd7488bd6f553104fb95d0c5c15d4ad9, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  device: {fileID: 0}
-  pointCloudMeshRenderer: {fileID: 0}
+  device: {fileID: 1511}
+  pointCloudMeshRenderer: {fileID: 1777618769}
 --- !u!1001 &1500
 PrefabInstance:
   m_ObjectHideFlags: 0
@@ -1031,6 +1043,18 @@ PrefabInstance:
 --- !u!4 &1712 stripped
 Transform:
   m_CorrespondingSourceObject: {fileID: 4093320342193112, guid: a2bade7ff40ff92409855b062870dccd,
+    type: 3}
+  m_PrefabInstance: {fileID: 1710}
+  m_PrefabAsset: {fileID: 0}
+--- !u!23 &1273587900 stripped
+MeshRenderer:
+  m_CorrespondingSourceObject: {fileID: 23213942756892742, guid: a2bade7ff40ff92409855b062870dccd,
+    type: 3}
+  m_PrefabInstance: {fileID: 1700}
+  m_PrefabAsset: {fileID: 0}
+--- !u!23 &1777618769 stripped
+MeshRenderer:
+  m_CorrespondingSourceObject: {fileID: 23213942756892742, guid: a2bade7ff40ff92409855b062870dccd,
     type: 3}
   m_PrefabInstance: {fileID: 1710}
   m_PrefabAsset: {fileID: 0}
