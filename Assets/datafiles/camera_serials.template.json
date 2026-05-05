@@ -1,6 +1,18 @@
 {
   "cameraA": "ENTER_D455_SERIAL_A",
   "cameraB": "ENTER_D455_SERIAL_B",
-  "layoutMode": "side_by_side",
-  "pointCloudRootBOffsetX": 0.75
+  "layoutMode": "b_to_a_alignment",
+  "cameraAIsLeft": true,
+  "baselineMeters": 0.35,
+  "toeInYawDegrees": 0.0,
+  "cameraBPositionInA": {
+    "x": 0.35,
+    "y": 0.0,
+    "z": 0.0
+  },
+  "cameraBRotationInAEuler": {
+    "x": 0.0,
+    "y": 0.0,
+    "z": 0.0
+  }
 }

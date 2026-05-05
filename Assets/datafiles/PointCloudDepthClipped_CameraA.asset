@@ -78,7 +78,7 @@ MonoBehaviour:
   m_Name: RsThresholdFilter
   m_EditorClassIdentifier: 
   enabled: 1
-  MinDistance: 0.28
+  MinDistance: 0.2
   MaxDistance: 0.8
 --- !u!114 &114998877665544333
 MonoBehaviour:
