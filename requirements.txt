@@ -2,3 +2,4 @@ pyrealsense2
 open3d
 numpy
 scipy
+opencv-contrib-python>=4.7
